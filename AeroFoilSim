@@ -1,0 +1,271 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.widgets import Slider, TextBox, Button
+import matplotlib.animation as animation
+
+fig = plt.figure(figsize=(15, 9))
+fig.patch.set_facecolor('#e2e8f0')
+fig.canvas.manager.set_window_title('NASA FoilSim SI - Smooth Aerodynamic Flow')
+
+ax_flow = plt.subplot2grid((3, 3), (0, 0), rowspan=2, colspan=2)
+ax_out = plt.subplot2grid((3, 3), (0, 2), rowspan=1, colspan=1)
+ax_bar = plt.subplot2grid((3, 3), (1, 2), rowspan=1, colspan=1)
+
+plt.subplots_adjust(left=0.08, bottom=0.38, right=0.95, top=0.92, wspace=0.3, hspace=0.35)
+
+NUM_COLS = 24
+PARTICLES_PER_COL = 36
+
+y_rows = np.linspace(-1.1, 1.1, PARTICLES_PER_COL)
+x_initial_cols = np.linspace(-0.8, 2.2, NUM_COLS, endpoint=False)
+
+particles_x = np.zeros((NUM_COLS, PARTICLES_PER_COL))
+for c in range(NUM_COLS):
+    particles_x[c, :] = x_initial_cols[c]
+
+particles_y0 = np.tile(y_rows, (NUM_COLS, 1))
+particles_y = np.copy(particles_y0)
+
+def generate_naca_airfoil(camber_pct, thick_pct, num_points=140):
+    """Generează geometria profilului NACA 4-digit"""
+    m = camber_pct / 100.0
+    p = 0.4
+    t = max(0.01, thick_pct / 100.0)
+    
+    x = np.linspace(0, 1, num_points)
+    yt = 5 * t * (0.2969 * np.sqrt(x) - 0.1260 * x - 0.3516 * x**2 + 0.2843 * x**3 - 0.1015 * x**4)
+    
+    yc = np.zeros_like(x)
+    dyc_dx = np.zeros_like(x)
+    for i, xi in enumerate(x):
+        if xi < p:
+            if p > 0:
+                yc[i] = (m / p**2) * (2 * p * xi - xi**2)
+                dyc_dx[i] = (2 * m / p**2) * (p - xi)
+        else:
+            if p < 1:
+                yc[i] = (m / (1 - p)**2) * ((1 - 2 * p) + 2 * p * xi - xi**2)
+                dyc_dx[i] = (2 * m / (1 - p)**2) * (p - xi)
+                
+    theta = np.arctan(dyc_dx)
+    xu = x - yt * np.sin(theta)
+    yu = yc + yt * np.cos(theta)
+    xl = x + yt * np.sin(theta)
+    yl = yc - yt * np.cos(theta)
+    
+    return np.concatenate([xu[::-1], xl[1:]]), np.concatenate([yu[::-1], yl[1:]])
+
+def compute_physics(speed_kmh, alt_m, angle_deg, camber_pct, thick_pct, area_m2):
+    """Calculul forțelor aerodinamice SI"""
+    rho = 1.225 * np.exp(-alt_m / 9200.0)
+    v_ms = speed_kmh / 3.6
+    q = 0.5 * rho * (v_ms**2)
+    
+    alpha_rad = np.radians(angle_deg)
+    cl_0 = 2.0 * np.pi * (camber_pct / 100.0 * 2.0)
+    cl = 2.0 * np.pi * alpha_rad + cl_0
+    
+    if angle_deg > 14:
+        cl *= np.exp(-(angle_deg - 14) * 0.12)
+    elif angle_deg < -10:
+        cl *= np.exp((angle_deg + 10) * 0.12)
+        
+    cd_0 = 0.012 + 0.04 * (thick_pct / 100.0)
+    cd_induced = (cl**2) / (np.pi * 6.0 * 0.85)
+    cd = cd_0 + cd_induced
+    
+    lift = max(0.0, cl * q * area_m2)
+    drag = max(0.1, cd * q * area_m2)
+    return lift, drag, cl, cd
+
+ax_flow.set_facecolor('#080d1a')
+ax_flow.set_xlim(-0.8, 2.2)
+ax_flow.set_ylim(-1.2, 1.2)
+ax_flow.grid(True, color='#1e293b', linestyle='--', alpha=0.4)
+
+airfoil_patch = plt.Polygon([[0,0]], closed=True, color='#f8fafc', edgecolor='#cbd5e1', lw=1.5, zorder=5)
+ax_flow.add_patch(airfoil_patch)
+
+particles_scatter = ax_flow.scatter(particles_x.flatten(), particles_y.flatten(), c='#38bdf8', s=12, alpha=0.9, zorder=4, cmap='viridis')
+
+ax_color = '#ffffff'
+s_speed = Slider(plt.axes([0.12, 0.24, 0.23, 0.022], facecolor=ax_color), 'Speed (km/h)', 0, 1200, valinit=250, valstep=10)
+tb_speed = TextBox(plt.axes([0.37, 0.24, 0.06, 0.022]), '', initial='250')
+
+s_alt   = Slider(plt.axes([0.12, 0.18, 0.23, 0.022], facecolor=ax_color), 'Altitude (m)', 0, 20000, valinit=3000, valstep=250)
+tb_alt   = TextBox(plt.axes([0.37, 0.18, 0.06, 0.022]), '', initial='3000')
+
+s_angle = Slider(plt.axes([0.12, 0.12, 0.23, 0.022], facecolor=ax_color), 'Angle (deg)', -25, 30, valinit=5, valstep=0.5)
+tb_angle = TextBox(plt.axes([0.37, 0.12, 0.06, 0.022]), '', initial='5')
+
+s_camber= Slider(plt.axes([0.58, 0.24, 0.23, 0.022], facecolor=ax_color), 'Camber (%)', 0, 15, valinit=6, valstep=0.5)
+tb_camber = TextBox(plt.axes([0.83, 0.24, 0.06, 0.022]), '', initial='6')
+
+s_thick = Slider(plt.axes([0.58, 0.18, 0.23, 0.022], facecolor=ax_color), 'Thickness (%)', 1, 30, valinit=12, valstep=0.5)
+tb_thick = TextBox(plt.axes([0.83, 0.18, 0.06, 0.022]), '', initial='12')
+
+s_area  = Slider(plt.axes([0.58, 0.12, 0.23, 0.022], facecolor=ax_color), 'Wing Area (m²)', 1, 500, valinit=100, valstep=5)
+tb_area  = TextBox(plt.axes([0.83, 0.12, 0.06, 0.022]), '', initial='100')
+
+for s in [s_speed, s_alt, s_angle, s_camber, s_thick, s_area]:
+    s.valtext.set_visible(False)
+
+updating_flag = False
+
+def update_ui(val=None):
+    global updating_flag
+    if updating_flag:
+        return
+    updating_flag = True
+    
+    speed, alt, angle = s_speed.val, s_alt.val, s_angle.val
+    camber, thick, area = s_camber.val, s_thick.val, s_area.val
+    
+    tb_speed.set_val(f"{speed:.0f}")
+    tb_alt.set_val(f"{alt:.0f}")
+    tb_angle.set_val(f"{angle:.1f}")
+    tb_camber.set_val(f"{camber:.1f}")
+    tb_thick.set_val(f"{thick:.1f}")
+    tb_area.set_val(f"{area:.0f}")
+    
+    updating_flag = False
+    
+    lift, drag, cl, cd = compute_physics(speed, alt, angle, camber, thick, area)
+    
+
+    x_foil, y_foil = generate_naca_airfoil(camber, thick)
+    aoa_rad = np.radians(angle)
+    cos_a, sin_a = np.cos(-aoa_rad), np.sin(-aoa_rad)
+    rot = np.array([[cos_a, -sin_a], [sin_a, cos_a]])
+    
+    rotated = rot.dot(np.vstack((x_foil - 0.25, y_foil)))
+    rx, ry = rotated[0] + 0.25, rotated[1]
+    airfoil_patch.set_xy(np.column_stack([rx, ry]))
+    
+    ax_flow.set_title(f"Dynamic NACA Streamline Flow (AoA: {angle:.1f}° | Speed: {speed:.0f} km/h)", 
+                      color='#0f172a', fontsize=12, fontweight='bold', pad=12)
+    
+    ax_out.clear()
+    ax_out.set_facecolor('#f1f5f9')
+    ax_out.axis('off')
+    ax_out.text(0.05, 0.88, "FoilSim III Outputs (SI)", fontsize=12, fontweight='bold', color='#0f172a')
+    
+    outputs = [
+        ("Lift:", f"{int(lift):,} N".replace(',', ' ')),
+        ("Drag:", f"{int(drag):,} N".replace(',', ' ')),
+        ("CLift:", f"{cl:.4f}"),
+        ("CDrag:", f"{cd:.4f}")
+    ]
+    
+    y_pos = 0.68
+    for label, val_str in outputs:
+        ax_out.text(0.05, y_pos, label, fontsize=10, fontweight='bold', color='#334155')
+        ax_out.text(0.42, y_pos - 0.02, f" {val_str} ", fontsize=10, fontweight='bold',
+                    bbox=dict(boxstyle='round,pad=0.3', facecolor='#ffffff', edgecolor='#cbd5e1'))
+        y_pos -= 0.18
+
+    ax_bar.clear()
+    ax_bar.set_facecolor('#ffffff')
+    ax_bar.set_title("Force Comparison (N)", fontsize=10)
+    ax_bar.bar(['Lift', 'Drag'], [lift, drag], color=['#0284c7', '#ef4444'], width=0.45)
+    ax_bar.grid(axis='y', linestyle='--', alpha=0.5)
+
+def make_tb_callback(slider, min_v, max_v):
+    def callback(text):
+        try:
+            val = float(text)
+            val = max(min_v, min(max_v, val))
+            slider.set_val(val)
+        except ValueError:
+            pass
+    return callback
+
+tb_speed.on_submit(make_tb_callback(s_speed, 0, 1200))
+tb_alt.on_submit(make_tb_callback(s_alt, 0, 20000))
+tb_angle.on_submit(make_tb_callback(s_angle, -25, 30))
+tb_camber.on_submit(make_tb_callback(s_camber, 0, 15))
+tb_thick.on_submit(make_tb_callback(s_thick, 1, 30))
+tb_area.on_submit(make_tb_callback(s_area, 1, 500))
+
+for s in [s_speed, s_alt, s_angle, s_camber, s_thick, s_area]:
+    s.on_changed(update_ui)
+
+ax_reset = plt.axes([0.45, 0.04, 0.1, 0.035])
+btn_reset = Button(ax_reset, 'Reset All', color='#ef4444', hovercolor='#dc2626')
+
+def reset(event):
+    for s in [s_speed, s_alt, s_angle, s_camber, s_thick, s_area]:
+        s.reset()
+
+btn_reset.on_clicked(reset)
+
+def animate(frame):
+    global particles_x, particles_y
+    
+    speed_kmh = s_speed.val
+    angle_deg = s_angle.val
+    camber_pct = s_camber.val
+    thick_pct = s_thick.val
+    
+    v_base = (speed_kmh / 1200.0) * 0.022 + 0.005
+    aoa_rad = np.radians(angle_deg)
+    
+    upper_mask = particles_y0 > 0
+    chord_zone = np.exp(-((particles_x - 0.35)**2) / 0.18)
+    dist_decay = np.exp(-1.4 * np.abs(particles_y0))
+    
+    speed_change = np.zeros_like(particles_x)
+    speed_change[upper_mask] = (0.35 + 0.35 * np.sin(np.maximum(0, aoa_rad))) * chord_zone[upper_mask]
+    speed_change[~upper_mask] = -(0.20 + 0.15 * np.sin(np.maximum(0, aoa_rad))) * chord_zone[~upper_mask]
+    
+    vx = v_base * (1.0 + speed_change * dist_decay)
+    particles_x += vx
+
+    t = max(0.01, thick_pct / 100.0)
+    m = camber_pct / 100.0
+   
+    x_loc = (particles_x - 0.25) * np.cos(aoa_rad) + particles_y0 * np.sin(aoa_rad) + 0.25
+    x_c = np.clip(x_loc, 0.001, 0.999)
+
+    yt = 5 * t * (0.2969 * np.sqrt(x_c) - 0.1260 * x_c - 0.3516 * x_c**2 + 0.2843 * x_c**3 - 0.1015 * x_c**4)
+    p = 0.4
+    yc = np.where(x_c < p, 
+                  (m / (p**2 + 1e-5)) * (2 * p * x_c - x_c**2), 
+                  (m / ((1 - p)**2 + 1e-5)) * ((1 - 2 * p) + 2 * p * x_c - x_c**2))
+    
+    smooth_in = np.exp(-((x_loc - 0.0)**2) / 0.06) * (x_loc < 0)
+    smooth_body = (x_loc >= 0) & (x_loc <= 1.0)
+    smooth_out = np.exp(-((x_loc - 1.0)**2) / 0.25) * (x_loc > 1.0)
+    
+    smooth_env = smooth_in + smooth_body + smooth_out
+    
+    # Decalaj vertical global produs de rotația aripii
+    aoa_shift = -(particles_x - 0.25) * np.sin(aoa_rad)
+    
+    base_up = yc + yt + 0.03
+    base_low = yc - yt - 0.03
+    
+    h_up = (base_up * np.cos(aoa_rad) + aoa_shift) * smooth_env
+    h_low = (base_low * np.cos(aoa_rad) + aoa_shift) * smooth_env
+
+    downwash_effect = -np.sin(aoa_rad) * 0.35 * (1.0 / (1.0 + np.exp(-5.0 * (particles_x - 0.5))))
+
+    delta_y = np.zeros_like(particles_x)
+    delta_y[upper_mask] = h_up[upper_mask] * np.exp(-1.5 * particles_y0[upper_mask])
+    delta_y[~upper_mask] = h_low[~upper_mask] * np.exp(-1.5 * np.abs(particles_y0[~upper_mask]))
+    
+    particles_y = particles_y0 + delta_y + downwash_effect * dist_decay
+
+    for c in range(NUM_COLS):
+        if np.min(particles_x[c, :]) > 2.2:
+            particles_x[c, :] = -0.8
+            
+    particles_scatter.set_offsets(np.column_stack([particles_x.flatten(), particles_y.flatten()]))
+    particles_scatter.set_array(vx.flatten())
+    
+    return particles_scatter,
+
+update_ui()
+ani = animation.FuncAnimation(fig, animate, interval=16, blit=False)
+
+plt.show()
